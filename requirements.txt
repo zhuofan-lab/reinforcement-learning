@@ -1,0 +1,5 @@
+# torch 请先按自己机器的 CUDA / 驱动版本装好（https://pytorch.org），这里不写，免得 pip 把它换掉。
+# 下面是测试过的最低版本（搭配 torch 2.5）；最新版（transformers 5.x）也测过。
+transformers>=4.56
+peft>=0.13
+accelerate>=1.0
