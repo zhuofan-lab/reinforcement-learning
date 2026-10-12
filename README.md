@@ -2,7 +2,7 @@
 
 大模型后训练里三种常见算法的最小实现：**PPO**、**DPO**、**GRPO**。每个算法一个百来行的训练脚本，外加一个通用的推理 / 评测脚本。
 
-三者共用同一个玩具任务（整数算术题，要求输出 `<answer>结果</answer>`）和同一个打分函数，方便放在一起比较。默认模型是 `Qwen/Qwen2.5-0.5B-Instruct` + LoRA，按 8 卡 3090 配置。
+三者共用同一个玩具任务（整数算术题，要求输出 `<answer>结果</answer>`）和同一个打分函数，方便放在一起比较。默认模型是本机的 `/home/xzf/data/model/Qwen2.5-0.5B-Instruct` + LoRA，按 8 卡 3090 配置。
 
 > **验证状态**：目前只在 CPU 上用迷你模型验证过，还没有在 GPU 和真实的 Qwen 上跑过。默认超参是按经验给的起点，不是调出来的。详见[验证情况](#验证情况)。
 
@@ -19,24 +19,32 @@
 ## 运行
 
 ```bash
-pip install -r requirements.txt   # torch 请先按自己的 CUDA 版本装好
+cd reinforcement-learning   # 下面的命令都在仓库目录下执行
 
-# 建议先跑一遍冒烟测试：随机迷你模型，不联网，约 1 分钟
-LAUNCH="accelerate launch --multi_gpu --num_processes 8" bash tests/smoke.sh
+# 依赖装进仓库自己的虚拟环境，不改动现有环境；--system-site-packages 直接复用已经装好的 torch
+python -m venv --system-site-packages .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
+L="python -m torch.distributed.run --standalone --nproc_per_node 8 --log-dir outputs/torchrun"   # 8 卡启动命令
+LAUNCH="$L" bash tests/smoke.sh   # 建议先跑一遍冒烟测试：随机迷你模型，不联网，约 1 分钟
 bash run_8gpu.sh                  # 依次训练 DPO / PPO / GRPO，再评测基座和三个适配器
 ```
 
 单独跑某一个：
 
 ```bash
-accelerate launch --multi_gpu --num_processes 8 train_grpo.py                     # 训练，适配器存到 outputs/grpo
-accelerate launch --multi_gpu --num_processes 8 infer.py --adapter outputs/grpo   # 评测；不加 --adapter 就是基座
-python infer.py --adapter outputs/grpo --prompt "计算：37 * 6"                    # 问一句
-python train_grpo.py                                                              # 单卡
+$L train_grpo.py                                                 # 训练，适配器存到 outputs/grpo
+$L infer.py --adapter outputs/grpo                               # 评测；不加 --adapter 就是基座
+python infer.py --adapter outputs/grpo --prompt "计算：37 * 6"   # 问一句
+python train_grpo.py                                             # 单卡
 ```
 
-第一次运行会从 Hugging Face 下载模型。直连不通的话可以设 `HF_ENDPOINT` 指向镜像，或者先把模型下到本地再用 `--model 本地目录`。每个脚本的全部参数见 `--help`。
+用 `python -m torch.distributed.run` 而不是 `accelerate launch` 启动，是为了保证用的是当前（虚拟）环境里的 Python；`--standalone` 会自动挑一个空闲端口，不会和机器上别的任务冲突；`--log-dir` 让它的日志目录也留在仓库里，而不是在 `/tmp` 下建 `torchelastic_*`。
+
+模型默认读 `common.py` 里的 `MODEL`（`/home/xzf/data/model/Qwen2.5-0.5B-Instruct`），不联网下载。换模型就改这个常量，或者运行时加 `--model 路径`（`run_8gpu.sh` 用 `MODEL=路径 bash run_8gpu.sh`）。每个脚本的全部参数见 `--help`。
+
+训练结果只写到当前目录下的 `outputs/<算法>/`（只有 LoRA 适配器，几 MB；`run_8gpu.sh` 会先进入仓库目录），重跑会覆盖同名目录。此外只有冒烟测试会在 `/tmp` 建临时目录，跑完自动删除。用本地模型时不联网，也不写 Hugging Face 缓存。
 
 ## 三种算法
 
@@ -60,7 +68,7 @@ python train_grpo.py                                                            
 
 - **PPO / GRPO**：改 `common.py` 里的 `make_problem`（出题）和 `reward_fn`（打分），需要的话改 `SYSTEM` 提示词和 `--max_new_tokens`。
 - **DPO**：`--data pairs.jsonl`，每行 `{"prompt": ..., "chosen": ..., "rejected": ...}`，可选 `"system"`。
-- **换模型**：`--model` 换成别的聊天模型（Qwen、Llama 等）或本地目录。
+- **换模型**：改 `common.py` 里的 `MODEL`，或者运行时加 `--model`（本地目录或 Hugging Face 上的模型名都行）。
 
 ## 注意
 

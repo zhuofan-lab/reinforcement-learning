@@ -2,7 +2,9 @@
 
 问一句：       python infer.py --adapter outputs/grpo --prompt "计算：37 * 6"
 评测（单卡）： python infer.py --adapter outputs/grpo
-评测（8 卡）： accelerate launch --multi_gpu --num_processes 8 infer.py --adapter outputs/grpo
+评测（8 卡）：
+    python -m torch.distributed.run --standalone --nproc_per_node 8 --log-dir outputs/torchrun \
+        infer.py --adapter outputs/grpo
 """
 
 import argparse
@@ -11,12 +13,12 @@ import random
 from accelerate import Accelerator
 from accelerate.utils import gather_object
 
-from common import SYSTEM, build_prompt, generate, load, make_problem, parse_answer, reward_fn
+from common import MODEL, SYSTEM, build_prompt, generate, load, make_problem, parse_answer, reward_fn
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    p.add_argument("--model", default=MODEL, help="模型目录，默认见 common.py 的 MODEL")
     p.add_argument("--adapter", default=None, help="训练脚本的输出目录（LoRA 适配器）")
     p.add_argument("--prompt", default=None, help="给了就只回答这一句；不给就在算术题上评测")
     p.add_argument("--system", default=SYSTEM, help='系统提示词，传 "" 表示不用')

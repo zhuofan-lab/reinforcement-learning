@@ -3,7 +3,7 @@
 # 只检查流程能跑通（迷你模型什么都不会，reward 一直是 0 属于正常）。
 #
 #   bash tests/smoke.sh                                                            # 单进程（有 GPU 就用第一张）
-#   LAUNCH="accelerate launch --multi_gpu --num_processes 8" bash tests/smoke.sh   # 正式训练前先验一遍 8 卡流程
+#   LAUNCH="python -m torch.distributed.run --standalone --nproc_per_node 8 --log-dir outputs/torchrun" bash tests/smoke.sh   # 正式训练前先验一遍 8 卡流程
 set -euo pipefail
 cd "$(dirname "$0")/.."
 LAUNCH=${LAUNCH:-python}

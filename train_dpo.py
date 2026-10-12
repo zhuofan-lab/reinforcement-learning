@@ -8,7 +8,7 @@ loss = -log σ( β·[ (log π(chosen) - log π_ref(chosen)) - (log π(rejected) 
 每行 {"prompt": ..., "chosen": ..., "rejected": ...}，可选 "system"。
 
 单卡：python train_dpo.py
-8 卡：accelerate launch --multi_gpu --num_processes 8 train_dpo.py
+8 卡：python -m torch.distributed.run --standalone --nproc_per_node 8 --log-dir outputs/torchrun train_dpo.py
 """
 
 import argparse
@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 
-from common import SYSTEM, build_prompt, load, make_pair
+from common import MODEL, SYSTEM, build_prompt, load, make_pair
 
 
 def encode(tok, prompts, responses, device):
@@ -55,7 +55,7 @@ def dpo_loss(pi_c, pi_r, ref_c, ref_r, beta):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    p.add_argument("--model", default=MODEL, help="模型目录，默认见 common.py 的 MODEL")
     p.add_argument("--out", default="outputs/dpo")
     p.add_argument("--data", default=None, help="偏好对 jsonl；不给就用合成的算术偏好对")
     p.add_argument("--steps", type=int, default=200)

@@ -12,6 +12,8 @@ import torch
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# 默认读本机的模型目录，不联网下载；换模型改这里，或者运行时加 --model
+MODEL = "/home/xzf/data/model/Qwen2.5-0.5B-Instruct"
 SYSTEM = "你是一个计算器。只输出最终结果，不要输出任何别的内容。输出格式示例：<answer>42</answer>"
 OPS = {"+": operator.add, "-": operator.sub, "*": operator.mul}
 ANSWER = re.compile(r"<answer>\s*(-?\d+)\s*</answer>")

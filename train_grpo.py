@@ -4,7 +4,7 @@
 不需要价值网络。参考模型就是"关掉 LoRA 的基座"，所以显存里只有一份权重。
 
 单卡：python train_grpo.py
-8 卡：accelerate launch --multi_gpu --num_processes 8 train_grpo.py
+8 卡：python -m torch.distributed.run --standalone --nproc_per_node 8 --log-dir outputs/torchrun train_grpo.py
 """
 
 import argparse
@@ -14,7 +14,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 
-from common import build_prompt, generate, load, make_problem, parse_answer, reward_fn, token_logprobs
+from common import MODEL, build_prompt, generate, load, make_problem, parse_answer, reward_fn, token_logprobs
 
 
 def grpo_loss(logp, old_logp, ref_logp, adv, mask, clip, beta):
@@ -34,7 +34,7 @@ def grpo_loss(logp, old_logp, ref_logp, adv, mask, clip, beta):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    p.add_argument("--model", default=MODEL, help="模型目录，默认见 common.py 的 MODEL")
     p.add_argument("--out", default="outputs/grpo")
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--batch_size", type=int, default=4, help="每张卡每步的题目数")
