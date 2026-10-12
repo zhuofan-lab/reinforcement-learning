@@ -1,4 +1,4 @@
-"""任务、奖励和三个损失函数的单元测试，不需要模型。
+"""任务、奖励和各个损失函数的单元测试，不需要模型。
 
 运行：python tests/test_math.py（或 pytest tests/）
 """
@@ -10,9 +10,12 @@ import sys
 import torch
 
 sys.path.insert(0, ".")
-from common import make_pair, make_problem, parse_answer, reward_fn  # noqa: E402
+from common import Rollout, make_pair, make_problem, parse_answer, reward_fn  # noqa: E402
+from train_dapo import dapo_loss, overlong_penalty, pad_cat  # noqa: E402
 from train_dpo import dpo_loss  # noqa: E402
+from train_drgrpo import drgrpo_loss  # noqa: E402
 from train_grpo import grpo_loss  # noqa: E402
+from train_gspo import gspo_loss  # noqa: E402
 from train_ppo import gae, ppo_loss  # noqa: E402
 
 
@@ -145,6 +148,127 @@ def test_dpo_loss():
     assert math.isclose(loss.item(), (math.log1p(math.exp(-1.0)) + math.log1p(math.exp(-0.5))) / 2, rel_tol=1e-6)
     loss.backward()
     assert (pi_c.grad < 0).all() and (pi_r.grad > 0).all()  # 梯度下降会抬高 chosen、压低 rejected
+
+
+def test_drgrpo_loss():
+    torch.manual_seed(0)
+    n, t, max_len = 6, 5, 8
+    mask, adv, old = random_mask(n, t), torch.randn(n, 1), -torch.rand(n, t)
+
+    # 起点：每个 token 的梯度是 -A_i / (N · max_len)，和回答长度无关（GRPO 是 -A_i / (N · |o_i|)）
+    logp = old.clone().requires_grad_()
+    loss, kl = drgrpo_loss(logp, old, old, adv, mask, clip=0.2, beta=0.0, max_len=max_len)
+    loss.backward()
+    assert torch.allclose(logp.grad, -adv * mask / (n * max_len), atol=1e-7)
+    assert torch.allclose(kl, torch.zeros(n))
+
+    # 每个 token 上的项（裁剪、KL）和 GRPO 完全一样：所有回答都正好 max_len 长时，两者的 loss 相等
+    full = torch.ones(n, max_len)
+    old = -torch.rand(n, max_len)
+    logp, ref = old + 0.3 * torch.randn(n, max_len), old + 0.3 * torch.randn(n, max_len)
+    a = drgrpo_loss(logp, old, ref, adv, full, 0.2, 0.04, max_len)
+    b = grpo_loss(logp, old, ref, adv, full, 0.2, 0.04)
+    assert torch.allclose(a[0], b[0]) and torch.allclose(a[1], b[1])
+
+    # EOS 之后的位置无论是什么数都不影响结果
+    old = -torch.rand(n, t)
+    logp, ref = old + 0.1 * torch.randn(n, t), old + 0.1 * torch.randn(n, t)
+    junk = (1 - mask) * 1e4
+    a = drgrpo_loss(logp, old, ref, adv, mask, 0.2, 0.04, max_len)
+    b = drgrpo_loss(logp - junk, old + junk, ref + junk, adv, mask, 0.2, 0.04, max_len)
+    assert torch.isfinite(b[0]) and torch.allclose(a[0], b[0]) and torch.allclose(a[1], b[1])
+
+
+def test_gspo_loss():
+    torch.manual_seed(0)
+    n, t = 6, 5
+    mask, adv, old = random_mask(n, t), torch.randn(n, 1), -torch.rand(n, t)
+
+    # 起点 s_i = 1：每个 token 的梯度是 -A_i / (N · |o_i|)，和 GRPO 起点的梯度一样，也不裁剪
+    logp = old.clone().requires_grad_()
+    loss, clipped = gspo_loss(logp, old, adv, mask, 3e-4, 4e-4)
+    loss.backward()
+    assert torch.allclose(logp.grad, -adv * mask / mask.sum(1, keepdim=True) / n, atol=1e-7)
+    assert clipped == 0
+
+    # s_i = exp(回答内 log 比值的平均)，整条回答一起裁剪：一条 3 个有效 token 的回答，每个 token 的 log 比值都是 shift
+    row = torch.tensor([[1.0, 1.0, 1.0, 0.0]])
+    cases = [(1e-3, 1.0, True), (1e-3, -1.0, False), (-1e-3, 1.0, False), (-1e-3, -1.0, True), (1e-4, 1.0, False)]
+    for shift, advantage, clipped_expected in cases:
+        logp = torch.full((1, 4), shift, requires_grad=True)
+        loss, clipped = gspo_loss(logp, torch.zeros(1, 4), torch.tensor([[advantage]]), row, 3e-4, 4e-4)
+        loss.backward()
+        g = 0.0 if clipped_expected else -advantage * math.exp(shift) / 3
+        assert torch.allclose(logp.grad, torch.tensor([[g, g, g, 0.0]]), atol=1e-7), (shift, advantage)
+        assert bool(clipped) == clipped_expected
+
+    # EOS 之后的位置无论是什么数都不影响结果
+    logp = old + 1e-4 * torch.randn(n, t)
+    junk = (1 - mask) * 1e4
+    a = gspo_loss(logp, old, adv, mask, 3e-4, 4e-4)
+    b = gspo_loss(logp - junk, old + junk, adv, mask, 3e-4, 4e-4)
+    assert torch.isfinite(b[0]) and torch.allclose(a[0], b[0]) and torch.allclose(a[1], b[1])
+
+
+def test_dapo_loss():
+    torch.manual_seed(0)
+    n, t = 6, 5
+    mask, adv, old = random_mask(n, t), torch.randn(n, 1), -torch.rand(n, t)
+
+    # 起点：每个 token 的梯度是 -A_i / token 总数，不管它在长回答还是短回答里
+    logp = old.clone().requires_grad_()
+    loss, clipped = dapo_loss(logp, old, adv, mask, 0.2, 0.28, n_tokens=mask.sum())
+    loss.backward()
+    assert torch.allclose(logp.grad, -adv * mask / mask.sum(), atol=1e-7)
+    assert clipped == 0
+
+    # Clip-Higher：上界 1 + 0.28、下界 1 - 0.2；只有朝有利方向越界时才裁掉梯度
+    one = torch.ones(1, 1)
+    cases = [
+        (1.25, 1.0, False),
+        (1.3, 1.0, True),
+        (0.85, -1.0, False),
+        (0.75, -1.0, True),
+        (1.3, -1.0, False),
+        (0.75, 1.0, False),
+    ]
+    for ratio, advantage, clipped_expected in cases:
+        logp = torch.full((1, 1), math.log(ratio), requires_grad=True)
+        loss, clipped = dapo_loss(logp, 0 * one, advantage * one, one, 0.2, 0.28, n_tokens=1.0)
+        loss.backward()
+        g = 0.0 if clipped_expected else -advantage * ratio
+        assert math.isclose(logp.grad.item(), g, abs_tol=1e-6), (ratio, advantage)
+        assert bool(clipped) == clipped_expected
+
+    # EOS 之后的位置无论是什么数都不影响结果
+    logp = old + 0.1 * torch.randn(n, t)
+    junk = (1 - mask) * 1e4
+    a = dapo_loss(logp, old, adv, mask, 0.2, 0.28, mask.sum())
+    b = dapo_loss(logp - junk, old + junk, adv, mask, 0.2, 0.28, mask.sum())
+    assert torch.isfinite(b[0]) and torch.allclose(a[0], b[0]) and torch.allclose(a[1], b[1])
+
+
+def test_overlong_penalty_and_pad_cat():
+    # 最大长度 24、缓冲 8：16 以内不扣分，之后线性扣，到 24 扣 1
+    lengths = torch.tensor([10.0, 16.0, 20.0, 24.0])
+    assert torch.allclose(overlong_penalty(lengths, 24, 8), torch.tensor([0.0, 0.0, -0.5, -1.0]))
+
+    # 两轮采样的 prompt 长度、回答长度都不一样：prompt 往左补齐，回答往右补齐
+    a = Rollout(
+        torch.tensor([[0, 5, 6, 7, 8, 2]]), torch.tensor([[0, 1, 1, 1, 1, 1]]), torch.tensor([[1.0, 1.0]]), ["a"], 4
+    )
+    b = Rollout(
+        torch.tensor([[5, 6, 7, 9, 2, 0]]),
+        torch.tensor([[1, 1, 1, 1, 1, 0]]),
+        torch.tensor([[1.0, 1.0, 0.0]]),
+        ["b"],
+        3,
+    )
+    ids, mask, cmask, start = pad_cat([a, b], pad_id=0)
+    assert start == 4
+    assert ids.tolist() == [[0, 5, 6, 7, 8, 2, 0], [0, 5, 6, 7, 9, 2, 0]]
+    assert mask.tolist() == [[0, 1, 1, 1, 1, 1, 0], [0, 1, 1, 1, 1, 1, 0]]
+    assert cmask.tolist() == [[1.0, 1.0, 0.0], [1.0, 1.0, 0.0]]
 
 
 if __name__ == "__main__":
